@@ -5,10 +5,14 @@ import json
 import nltk
 import re
 
-nltk.download('punkt')
+from nltk.corpus import stopwords
 
-train_dir = 'data/aclImdb/train'
-test_dir = 'data/aclImdb/test'
+nltk.download('punkt')
+nltk.download('stopwords')
+
+data_dir = '../../data'
+train_dir = f'{data_dir}/aclImdb/train'
+test_dir = f'{data_dir}/aclImdb/test'
 neg_train_dir = f'{train_dir}/neg'
 pos_train_dir = f'{train_dir}/pos'
 
@@ -63,12 +67,30 @@ def make_er(train_data, ratings, use_cache=False):
     vocab_occurrences = {}
     porter = nltk.PorterStemmer()
     n_reviews = len(train_data)
+    stop_words = set(stopwords.words('english'))
     for i, rev in enumerate(train_data):
-        words = nltk.word_tokenize(clean(rev))
+        words = [word for word in nltk.word_tokenize(clean(rev)) if word not in stop_words]
         stems = [porter.stem(word) for word in words]
         n_words = len(words)
-        # Convert (1 to 10) to (-5 to 4)
-        rating = ratings[i] - 6
+        # Convert (1 to 10) to (-5 to 5)
+        rating = ratings[i]
+        if rating > 5:
+            rating -= 5
+        else:
+            rating -= 6
+        '''
+        10 5
+        9 4
+        8 3
+        7 2
+        6 1
+        ---
+        5 -1
+        4 -2
+        3 -3
+        2 -4
+        1 -5
+        '''
         rel_rating = rating / n_words
         for word in stems:
             vocab_ratings[word] = vocab_ratings.get(word, 0) + rel_rating
@@ -83,13 +105,13 @@ def make_er(train_data, ratings, use_cache=False):
 
 
 def main():
-    n_reviews = 6000
-    with open("data/aclImdb/imdb.vocab", 'r') as f:
+    n_reviews = 25000
+    with open(f"{data_dir}/aclImdb/imdb.vocab", 'r') as f:
         vocab = f.read().split('\n')
 
     vocab_index = {word: i for i, word in enumerate(vocab)}
 
-    with open("data/aclImdb/imdbEr.txt", 'r') as f:
+    with open(f"{data_dir}/aclImdb/imdbEr.txt", 'r') as f:
         expected_ratings = list(map(try_make_float, f.read().split('\n')))
 
     print("Finding reviews...")
@@ -99,27 +121,31 @@ def main():
     test_neg_fps = [fp for fp in os.listdir(neg_test_dir) if fp.endswith('.txt')]
 
     print("Loading reviews...")
-    pos_reviews = load_reviews(pos_fps, pos_train_dir)[:n_reviews//2]
-    neg_reviews = load_reviews(neg_fps, neg_train_dir)[:n_reviews//2]
+    pos_reviews = load_reviews(pos_fps, pos_train_dir)[:n_reviews // 2]
+    neg_reviews = load_reviews(neg_fps, neg_train_dir)[:n_reviews // 2]
     test_pos_reviews = load_reviews(test_pos_fps, pos_test_dir)
     test_neg_reviews = load_reviews(test_neg_fps, neg_test_dir)
-    print(f"{test_pos_reviews[0]=}")
+    # print(f"{test_pos_reviews[0]=}")
 
     print("Extracting ratings...")
-    pos_ratings = [get_rating(fp) for fp in pos_fps][:n_reviews//2]
-    neg_ratings = [get_rating(fp) for fp in neg_fps][:n_reviews//2]
+    pos_ratings = [get_rating(fp) for fp in pos_fps][:n_reviews // 2]
+    neg_ratings = [get_rating(fp) for fp in neg_fps][:n_reviews // 2]
     test_pos_ratings = [get_rating(fp) for fp in test_pos_fps]
+    test_pos_ratings = [get_rating(fp) for fp in test_neg_fps]
 
     print("Generating ERs...")
     # expected_ratings_dict = make_er(pos_reviews + neg_reviews, pos_ratings + neg_ratings)
     expected_ratings_dict = make_er([], [], use_cache=True)
 
+    positive_reviews = True
+    to_test = test_pos_reviews if positive_reviews else test_neg_reviews
+
     def evaluate():
         porter = nltk.PorterStemmer()
-        n_positive = 0
-        n_reviews = len(test_neg_reviews)
-        for i, rev in enumerate(test_neg_reviews):
-            words = [word.lower() for word in nltk.word_tokenize(clean(rev)) if word not in '.,\'"']
+        n_correct = 0
+        n_reviews = len(to_test)
+        for i, rev in enumerate(to_test):
+            words = nltk.word_tokenize(clean(rev))
             stems = [porter.stem(word) for word in words]
             sum_expected_rating = 0
             n_words = len(words)
@@ -127,16 +153,15 @@ def main():
                 expected_rating = expected_ratings_dict.get(word, 0)
                 sum_expected_rating += expected_rating
 
-            if sum_expected_rating > 0:
-                # print(n_positive, i)
-                n_positive += 1
+            if (sum_expected_rating > 0) == positive_reviews:
+                n_correct += 1
 
-            if i % 1000 == 0:
-                print(f"{i}/{n_reviews}...")
-                print(f"Accuracy: {n_positive}/{len(test_neg_reviews)} ({n_positive / len(test_neg_reviews)})...")
+            if i % 1000 == 0 and i != 0:
+                print(f"Processed: {i}/{n_reviews}...")
+                print(f"Accuracy: {n_correct}/{i} ({n_correct / i})...\n")
 
         print("Done evaluating.")
-        print(f"Accuracy: {n_positive}/{len(test_neg_reviews)} ({n_positive / len(test_neg_reviews)})")
+        print(f"Accuracy: {n_correct}/{len(to_test)} ({n_correct / len(to_test)})")
 
     print("Evaluating...")
     evaluate()
