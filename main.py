@@ -1,9 +1,15 @@
+import math
+import string
 from math import e
 from typing import List
 import os
 import json
 import nltk
 import re
+
+import numpy as np
+from nltk.lm import Vocabulary
+from sklearn.naive_bayes import MultinomialNB
 
 from nltk.corpus import stopwords
 
@@ -29,9 +35,12 @@ def get_rating(fp: str) -> int:
         raise Exception(f"Couldn't extract rating from filepath: '{fp}'") from e
 
 
-def load_reviews(fps: List[str], dir_: str) -> List[str]:
+def load_reviews(fps: List[str], dir_: str, max_n: int = -1) -> List[str]:
+    fps_cut = fps
+    if max_n != -1:
+        fps_cut = fps[:max_n]
     reviews = []
-    for fp in fps:
+    for fp in fps_cut:
         with open(dir_ + '/' + fp, 'r') as f:
             reviews.append(f.read())
 
@@ -58,62 +67,45 @@ def clean(x):
     return regex.sub(' ', x).lower()
 
 
-def make_er(train_data, ratings, use_cache=False):
-    if use_cache:
-        with open('results.txt', 'r') as f:
-            return json.load(f)
+ps = nltk.PorterStemmer()
+sw = set(stopwords.words())
+html_tag = re.compile('<.*?>|&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-f]{1,6});')
 
-    vocab_ratings = {}
-    vocab_occurrences = {}
-    porter = nltk.PorterStemmer()
-    n_reviews = len(train_data)
-    stop_words = set(stopwords.words('english'))
-    for i, rev in enumerate(train_data):
-        words = [word for word in nltk.word_tokenize(clean(rev)) if word not in stop_words]
-        stems = [porter.stem(word) for word in words]
-        n_words = len(words)
-        # Convert (1 to 10) to (-5 to 5)
-        rating = ratings[i]
-        if rating > 5:
-            rating -= 5
-        else:
-            rating -= 6
-        '''
-        10 5
-        9 4
-        8 3
-        7 2
-        6 1
-        ---
-        5 -1
-        4 -2
-        3 -3
-        2 -4
-        1 -5
-        '''
-        rel_rating = rating / n_words
-        for word in stems:
-            vocab_ratings[word] = vocab_ratings.get(word, 0) + rel_rating
-            vocab_occurrences[word] = vocab_occurrences.get(word, 0) + 1
-        if i % 1000 == 0:
-            print(f"{i}/{n_reviews}...")
-    vocab_ratings = {word: sum_ / vocab_occurrences[word] for word, sum_ in vocab_ratings.items()}
-    with open('results.txt', 'w') as f:
-        f.write(json.dumps(vocab_ratings))
 
-    return vocab_ratings
+def make_tfidf(reviews, vocab):
+    # Build TF matrix
+    tf = np.ndarray(shape=(len(reviews), len(vocab)))
+    idf = []
+    for i, review in enumerate(reviews):
+        clean_review = re.sub(html_tag, '', review)
+        tokens = nltk.word_tokenize(clean_review)
+        stems = [ps.stem(token, to_lowercase=True) for token in tokens if token not in sw]
+
+        tf[i] = [stems.count(stem) for stem in sorted(vocab)]
+
+    n_docs = len(reviews)
+    # Calculate Inverse Document Frequencies
+    for i, word in enumerate(sorted(vocab)):
+        if word not in vocab or word == '<UNK>':
+            idf.append(0)
+            continue
+        docs_with_word = 0
+        for row in tf:
+            if row[i] > 0:
+                docs_with_word += 1
+
+        if docs_with_word == 0:
+            idf.append(0)
+            continue
+
+        x = n_docs / docs_with_word
+        assert x >= 1, word
+
+        idf.append(math.log(x))
+    return tf * idf
 
 
 def main():
-    n_reviews = 25000
-    with open(f"{data_dir}/aclImdb/imdb.vocab", 'r') as f:
-        vocab = f.read().split('\n')
-
-    vocab_index = {word: i for i, word in enumerate(vocab)}
-
-    with open(f"{data_dir}/aclImdb/imdbEr.txt", 'r') as f:
-        expected_ratings = list(map(try_make_float, f.read().split('\n')))
-
     print("Finding reviews...")
     neg_fps = [fp for fp in os.listdir(neg_train_dir) if fp.endswith('.txt')]
     pos_fps = [fp for fp in os.listdir(pos_train_dir) if fp.endswith('.txt')]
@@ -121,50 +113,60 @@ def main():
     test_neg_fps = [fp for fp in os.listdir(neg_test_dir) if fp.endswith('.txt')]
 
     print("Loading reviews...")
-    pos_reviews = load_reviews(pos_fps, pos_train_dir)[:n_reviews // 2]
-    neg_reviews = load_reviews(neg_fps, neg_train_dir)[:n_reviews // 2]
-    test_pos_reviews = load_reviews(test_pos_fps, pos_test_dir)
-    test_neg_reviews = load_reviews(test_neg_fps, neg_test_dir)
+    pos_reviews = load_reviews(pos_fps, pos_train_dir, 1000)
+    neg_reviews = load_reviews(neg_fps, neg_train_dir, 1000)
+    test_pos_reviews = load_reviews(test_pos_fps, pos_test_dir, 100)
+    test_neg_reviews = load_reviews(test_neg_fps, neg_test_dir, 100)
     # print(f"{test_pos_reviews[0]=}")
 
     print("Extracting ratings...")
-    pos_ratings = [get_rating(fp) for fp in pos_fps][:n_reviews // 2]
-    neg_ratings = [get_rating(fp) for fp in neg_fps][:n_reviews // 2]
-    test_pos_ratings = [get_rating(fp) for fp in test_pos_fps]
-    test_pos_ratings = [get_rating(fp) for fp in test_neg_fps]
+    pos_ratings = [get_rating(fp) for fp in pos_fps][:len(pos_reviews)]
+    neg_ratings = [get_rating(fp) for fp in neg_fps][:len(neg_reviews)]
+    test_pos_ratings = [get_rating(fp) for fp in test_pos_fps][:len(test_pos_reviews)]
+    test_neg_ratings = [get_rating(fp) for fp in test_neg_fps][:len(test_neg_reviews)]
 
-    print("Generating ERs...")
-    # expected_ratings_dict = make_er(pos_reviews + neg_reviews, pos_ratings + neg_ratings)
-    expected_ratings_dict = make_er([], [], use_cache=True)
+    reviews = pos_reviews + neg_reviews
+    test_reviews = test_pos_reviews + test_neg_reviews
 
-    positive_reviews = True
-    to_test = test_pos_reviews if positive_reviews else test_neg_reviews
+    ratings = pos_ratings + neg_ratings
+    test_ratings = test_pos_ratings + test_neg_ratings
 
-    def evaluate():
-        porter = nltk.PorterStemmer()
-        n_correct = 0
-        n_reviews = len(to_test)
-        for i, rev in enumerate(to_test):
-            words = nltk.word_tokenize(clean(rev))
-            stems = [porter.stem(word) for word in words]
-            sum_expected_rating = 0
-            n_words = len(words)
-            for j, word in enumerate(stems):
-                expected_rating = expected_ratings_dict.get(word, 0)
-                sum_expected_rating += expected_rating
+    print("Collecting vocab...")
+    # https://stackoverflow.com/questions/9662346/python-code-to-remove-html-tags-from-a-string
+    all_words = []
+    for i, review in enumerate(reviews):
+        # Remove HTML tags
+        clean_review = re.sub(html_tag, '', review)
+        tokens = nltk.word_tokenize(clean_review)
+        stems = [ps.stem(token, to_lowercase=True) for token in tokens if token not in sw]
 
-            if (sum_expected_rating > 0) == positive_reviews:
-                n_correct += 1
+        # remove all punctuation
+        stems = [x for x in ["".join(c for c in s if c not in string.punctuation) for s in stems] if x]
+        all_words += stems
 
-            if i % 1000 == 0 and i != 0:
-                print(f"Processed: {i}/{n_reviews}...")
-                print(f"Accuracy: {n_correct}/{i} ({n_correct / i})...\n")
+    vocab = Vocabulary(all_words, unk_cutoff=5)
 
-        print("Done evaluating.")
-        print(f"Accuracy: {n_correct}/{len(to_test)} ({n_correct / len(to_test)})")
+    print("Making TFIDF for training data...")
+    tfidf = make_tfidf(reviews, vocab)
+    print("Making TFIDF for testing data...")
+    tfidf_test = make_tfidf(test_reviews, vocab)
+    mnb = MultinomialNB()
+    sentiment = ["pos" if rating > 5 else "neg" for rating in ratings]
 
-    print("Evaluating...")
-    evaluate()
+    print("Fitting model...")
+    model = mnb.fit(tfidf, sentiment)
+
+    print("Testing model...")
+    results = mnb.predict(tfidf_test)
+
+    n_correct = 0
+    for i, rating in enumerate(test_ratings):
+        actual = "pos" if rating > 5 else "neg"
+        predict = results[i]
+        if actual == predict:
+            n_correct += 1
+
+    print(f"{n_correct} correct out of {len(results)}. ({n_correct/len(results)})")
 
 
 if __name__ == "__main__":
